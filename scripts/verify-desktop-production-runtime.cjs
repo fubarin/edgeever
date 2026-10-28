@@ -28,8 +28,6 @@ async function main() {
   }
   const manager = await import(pathToFileURL(join(archive, "src/main/acp-adapter-manager.mjs")).href);
   assert.equal(typeof manager.createAcpAdapterManager, "function");
-  const { backgroundNodeExecutable } = await import(pathToFileURL(join(archive, "src/main/background-node.mjs")).href);
-  const nodeExecutable = backgroundNodeExecutable(process.execPath);
 
   const npmCli = join(dirname(resolveDependency("npm")), "bin/npm-cli.js");
   const npmRequire = createRequire(npmCli);
@@ -43,7 +41,7 @@ async function main() {
       writeFileSync(join(fixture, "package.json"), JSON.stringify({ name: "edgeever-packaging-fixture", version, main: "index.js" }));
       const tarball = join(root, `fixture-${version}.tgz`);
       await tar.c({ gzip: true, cwd: join(root, "fixture"), file: tarball }, ["package"]);
-      execFileSync(nodeExecutable, [npmCli, "install", "--prefix", join(root, "installed"),
+      execFileSync(process.execPath, [npmCli, "install", "--prefix", join(root, "installed"),
         "--cache", join(root, "cache"), "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
         "--package-lock=false", tarball], {
         cwd: root,

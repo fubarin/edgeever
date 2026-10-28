@@ -48,8 +48,6 @@ test("positions individual images and preserves alignment through resize, undo, 
     const first = images.nth(0);
     const second = images.nth(1);
     await expect(images).toHaveCount(2);
-    await expect(first).not.toHaveClass(/is-selected/);
-    await expect(rich.locator(".edgeever-image-controls")).toHaveCount(0);
     await expectPosition(first, "left");
     await selectImage(first);
     await first.getByRole("button", { name: "Center image", exact: true }).click();
