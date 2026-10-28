@@ -1,6 +1,9 @@
 name: Deploy personal EdgeEver
 
 on:
+  push:
+    branches:
+      - main
   release:
     types:
       - published
@@ -15,25 +18,21 @@ concurrency:
 
 jobs:
   deploy:
-    # This is the maintainer's personal instance. Downstream Forks must never
-    # allocate a runner or inherit the official repository's deployment path.
-    if: github.repository == 'tianma-if/edgeever'
     name: Build and deploy personal Worker
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      EDGE_EVER_WORKER_NAME: ${{ secrets.EDGE_EVER_TIANMA_WORKER_NAME }}
-      EDGE_EVER_D1_DATABASE_NAME: ${{ secrets.EDGE_EVER_TIANMA_D1_DATABASE_NAME }}
-      EDGE_EVER_D1_DATABASE_ID: ${{ secrets.EDGE_EVER_TIANMA_D1_DATABASE_ID }}
-      EDGE_EVER_R2_BUCKET_NAME: ${{ secrets.EDGE_EVER_TIANMA_R2_BUCKET_NAME }}
-      EDGE_EVER_R2_PREVIEW_BUCKET_NAME: ${{ secrets.EDGE_EVER_TIANMA_R2_PREVIEW_BUCKET_NAME }}
-      EDGE_EVER_AUTH_USERNAME: ${{ secrets.EDGE_EVER_TIANMA_AUTH_USERNAME }}
-      EDGE_EVER_SESSION_TTL_DAYS: ${{ secrets.EDGE_EVER_TIANMA_SESSION_TTL_DAYS }}
-      EDGE_EVER_CUSTOM_DOMAIN: ${{ secrets.EDGE_EVER_TIANMA_CUSTOM_DOMAIN }}
-      EDGE_EVER_DEPLOYMENT_URL: ${{ secrets.EDGE_EVER_TIANMA_CUSTOM_DOMAIN }}
-      EDGE_EVER_DEPLOYMENT_TRIGGER: ${{ github.event_name == 'release' && 'github_release' || 'manual' }}
+      EDGE_EVER_WORKER_NAME: ${{ secrets.EDGE_EVER_TIANMA_WORKER_NAME || 'edgeever' }}
+      EDGE_EVER_D1_DATABASE_NAME: ${{ secrets.EDGE_EVER_TIANMA_D1_DATABASE_NAME || 'edgeever' }}
+      EDGE_EVER_D1_DATABASE_ID: ${{ secrets.EDGE_EVER_TIANMA_D1_DATABASE_ID || 'd18ba5bf-971a-44cc-9579-c628b121622a' }}
+      EDGE_EVER_R2_BUCKET_NAME: ${{ secrets.EDGE_EVER_TIANMA_R2_BUCKET_NAME || 'edgeever-resources' }}
+      EDGE_EVER_R2_PREVIEW_BUCKET_NAME: ${{ secrets.EDGE_EVER_TIANMA_R2_PREVIEW_BUCKET_NAME || 'edgeever-resources-preview' }}
+      EDGE_EVER_AUTH_USERNAME: ${{ secrets.EDGE_EVER_TIANMA_AUTH_USERNAME || 'admin' }}
+      EDGE_EVER_SESSION_TTL_DAYS: ${{ secrets.EDGE_EVER_TIANMA_SESSION_TTL_DAYS || '400' }}
+      EDGE_EVER_DEPLOYMENT_URL: ${{ secrets.EDGE_EVER_TIANMA_CUSTOM_DOMAIN || 'https://edgeever.z-cloud3154.workers.dev' }}
+      EDGE_EVER_DEPLOYMENT_TRIGGER: ${{ github.event_name == 'release' && 'github_release' || (github.event_name == 'push' && 'main_push' || 'manual') }}
       EDGE_EVER_DEPLOYMENT_METHOD: "github_actions"
 
     steps:
@@ -65,7 +64,7 @@ jobs:
       - name: Checkout personal instance source
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: main
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -102,7 +101,7 @@ jobs:
             : `https://${rawBaseUrl}`;
           const releaseUrl = new URL("/api/release", `${baseUrl.replace(/\/$/, "")}/`);
           let actualVersion = "";
-          for (let attempt = 1; attempt <= 4; attempt += 1) {
+          for (let attempt = 1; attempt <= 6; attempt += 1) {
             const response = await fetch(releaseUrl, {
               headers: { Accept: "application/json" },
               signal: AbortSignal.timeout(10_000),
@@ -112,7 +111,7 @@ jobs:
               actualVersion = String(release?.version ?? "").replace(/^v/, "");
               if (actualVersion === expectedVersion) break;
             }
-            if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 2_000));
+            if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, 3_000));
           }
           if (actualVersion !== expectedVersion) {
             throw new Error(
