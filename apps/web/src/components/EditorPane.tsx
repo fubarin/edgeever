@@ -1,4 +1,5 @@
 import { AI_ASSISTANT_LAUNCHER_POSITION } from "@/lib/ai-assistant-launcher";
+import { editorClipboardTextSerializer } from "@/lib/editor-clipboard";
 import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo, lazy, Suspense, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
@@ -71,6 +72,7 @@ import {
   ImageUploadPlaceholderExtension,
   addImageUploadPlaceholder,
   createResourceUploadPlaceholder,
+  getImageUploadPlaceholderPosition,
   removeImageUploadPlaceholder,
   waitForImageSourceReady,
   updateImageUploadPlaceholder,
@@ -220,6 +222,7 @@ import {
 } from "@/lib/editor-external-link";
 import { createFileBatchQueue, processFileUploadBatch } from "@/lib/file-batch";
 import { resourceToMarkdown } from "@/lib/markdown-resource-paste";
+import { pasteBlockMarkdown } from "@/lib/markdown-text-paste";
 import { MEMO_ID_REMAPPED_EVENT, MEMO_SYNC_ACKNOWLEDGED_EVENT } from "@/lib/sync-events";
 import { useStandaloneMobileEditor } from "@/hooks/useStandaloneMobileEditor";
 import { statusSettleMotion } from "@/lib/motion";
@@ -254,6 +257,7 @@ import {
   type ImagePreviewRequestDetail,
 } from "./editor/ResizableImage";
 import { EditableImageGallery } from "./editor/ImageGallery";
+import { imageSelectionKey } from "./editor/image-selection";
 import { ImageViewer } from "./editor/ImageViewer";
 import { PdfAttachment } from "./editor/PdfAttachment";
 import { FileAttachment } from "./editor/FileAttachment";
@@ -1048,7 +1052,7 @@ const RichEditorPane = ({
     }
   }, [repository, t]);
 
-  const insertResourceFiles = useCallback((files: File[]) => {
+  const insertResourceFiles = useCallback((files: File[], dropPosition?: number) => {
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
 
@@ -1065,7 +1069,7 @@ const RichEditorPane = ({
       memoRef.current?.id,
     );
     const interactionVersionAtRequest = editorCanvasInteractionVersionRef.current;
-    const placeholderPosition = currentEditor.state.selection.from;
+    const placeholderPosition = dropPosition ?? currentEditor.state.selection.from;
     const placeholderByFile = new Map(files.map((file) => [file,
       createResourceUploadPlaceholder(file, {
         imagePreparing: t("editor.uploadState.imagePreparing"),
@@ -1093,7 +1097,7 @@ const RichEditorPane = ({
 
         // Read the selection only after earlier resource insertions complete.
         // Rapid consecutive pastes otherwise race with the same stale cursor.
-        const insertionTarget = getResourceInsertionTarget(insertionEditor.state.selection);
+        const insertionTarget = dropPosition ?? getResourceInsertionTarget(insertionEditor.state.selection);
         setImageUploadState("uploading");
         const imageReadiness: Promise<void>[] = [];
 
@@ -1180,8 +1184,16 @@ const RichEditorPane = ({
         });
 
         if (content.length > 0) {
+          // Drop anchors follow every document transaction, including edits made
+          // while this upload was queued. Never fall back to an unrelated caret
+          // if the user deleted the drop location or reset the document.
+          const mappedDropPosition = dropPosition === undefined ? undefined
+            : getImageUploadPlaceholderPosition(activeEditor.state, placeholders[0]!.id);
+          if (mappedDropPosition === null) {
+            throw new Error("The attachment drop location no longer exists");
+          }
           const safeInsertionTarget = clampResourceInsertionTarget(
-            insertionTarget,
+            mappedDropPosition ?? insertionTarget,
             activeEditor.state.doc.content.size,
           );
           const updateSelection = shouldSelectInsertedResources(
@@ -1275,6 +1287,7 @@ const RichEditorPane = ({
       : { type: "doc", content: [{ type: "paragraph" }] },
     editable: Boolean(memo && !effectiveReadOnly && editorIsHydratedForCurrentMemo),
     editorProps: {
+      clipboardTextSerializer: editorClipboardTextSerializer,
       attributes: {
         class: "edgeever-note-rich-editor prose prose-slate max-w-none focus:outline-none min-h-[240px] lg:min-h-[180px]",
         spellcheck: spellcheckEnabled ? "true" : "false",
@@ -1402,11 +1415,11 @@ const RichEditorPane = ({
         return true;
       },
       transformPastedHTML: (html) => wrapDetailsContentHtml(html),
-      handlePaste: (_view, event) => {
+      handlePaste: (view, event) => {
         const files = getResourceFilesFromDataTransfer(event.clipboardData);
 
         if (files.length === 0) {
-          return false;
+          return pasteBlockMarkdown(view, event.clipboardData);
         }
 
         event.preventDefault();
@@ -1422,7 +1435,12 @@ const RichEditorPane = ({
         }
 
         event.preventDefault();
-        insertResourceFiles(getResourceFilesFromDataTransfer(event.dataTransfer));
+        // Use the same coordinate lookup as ProseMirror's external drop cursor.
+        // A drop inserts at a point; it must never replace the old text selection.
+        const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY });
+        if (dropPosition) {
+          insertResourceFiles(getResourceFilesFromDataTransfer(event.dataTransfer), dropPosition.pos);
+        }
         return true;
       },
     },
@@ -1763,9 +1781,9 @@ const RichEditorPane = ({
 
   useEffect(() => {
     const showImageMenu = (event: Event) => {
-      if (isMobileViewport) return;
       const detail = (event as CustomEvent<ImageMenuRequestDetail>).detail;
       if (!detail?.element) return;
+      if (isMobileViewport && !detail.actionsElement) return;
       cancelResourceMenuHide();
       const rect = detail.element.getBoundingClientRect();
       showResourceMenu({
@@ -1932,6 +1950,7 @@ const RichEditorPane = ({
 
   useEffect(() => {
     if (!resourceMenuTarget) return;
+    if (resourceMenuTarget.kind === "image" && resourceMenuTarget.actionsElement) return;
     const hideMenu = () => hideResourceMenu();
     window.addEventListener("resize", hideMenu);
     window.addEventListener("scroll", hideMenu, true);
@@ -3300,7 +3319,7 @@ const RichEditorPane = ({
   }, []);
 
   const handleResourceDownload = useCallback(async (target: ResourceMenuTarget) => {
-    hideResourceMenu();
+    if (target.kind !== "image" || !target.actionsElement) hideResourceMenu();
     clearResourceActionError();
     downloadResourceDirectly(target);
   }, [clearResourceActionError, downloadResourceDirectly, hideResourceMenu]);
@@ -3402,7 +3421,7 @@ const RichEditorPane = ({
   }, []);
 
   const handleResourceCopy = useCallback((target: ResourceMenuTarget) => {
-    hideResourceMenu();
+    if (target.kind !== "image" || !target.actionsElement) hideResourceMenu();
     clearResourceActionError();
     // Start the clipboard write in this turn so Safari still has the click gesture.
     void copyResourceToClipboard({
@@ -3416,7 +3435,10 @@ const RichEditorPane = ({
 
   const openResourceDialog = useCallback((action: ResourceDialogState["action"], target: ResourceMenuTarget) => {
     openResourceActionDialog(action, target);
-  }, [openResourceActionDialog]);
+    if (target.kind === "image" && isEditorReady(editor)) {
+      editor.view.dispatch(editor.state.tr.setMeta(imageSelectionKey, null));
+    }
+  }, [editor, openResourceActionDialog]);
 
   const handleResourceRename = useCallback(async () => {
     const target = resourceDialog?.action === "rename" ? resourceDialog.target : null;
@@ -3950,7 +3972,9 @@ const RichEditorPane = ({
             to: stored?.to ?? draft.to,
             pos: stored?.pos ?? draft.pos,
           });
-          editor.chain().focus(stored?.from ?? draft.from ?? null, { scrollIntoView: true }).run();
+          // Keep the selection the insert left after the formula; focusing
+          // `from` put the caret back in front of it, so typing went there.
+          editor.chain().focus(null, { scrollIntoView: true }).run();
         }}
         onRemove={
           mathFormulaDraft && typeof mathFormulaDraft.pos === "number"
@@ -4605,8 +4629,11 @@ const RichEditorPane = ({
               noteProse={noteProse}
             />
           )}
-          {showDocumentOutline && (
+          {showDocumentOutline && memo && hydratedEditorMemoId === memo.id && (
             <EditorOutline
+              key={memo.id}
+              memoId={memo.id}
+              editingMemoIdRef={editingMemoIdRef}
               editor={editor}
               scrollContainer={editorScrollContainer}
               collapsedAnchor={collapsedOutlineAnchor}
