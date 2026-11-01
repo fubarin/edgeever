@@ -15,7 +15,7 @@ describe("memo template seeds", () => {
     expect(localizeMemoTemplateSeed(DEFAULT_MEMO_TEMPLATE_SEEDS[0], "ja-JP").title).toBe("ひらめきメモ");
     expect(localizeMemoTemplateSeed(DEFAULT_MEMO_TEMPLATE_SEEDS[0], "pl-PL").title).toBe("Szybka notatka");
     expect(localizeMemoTemplateSeed(DEFAULT_MEMO_TEMPLATE_SEEDS[0], "ko-KR").title).toBe("Quick Spark");
-    expect(localizeMemoTemplateSeed(DEFAULT_MEMO_TEMPLATE_SEEDS[0], null).title).toBe("灵感速记");
+    expect(localizeMemoTemplateSeed(DEFAULT_MEMO_TEMPLATE_SEEDS[0], null).title).toBe("Quick Spark");
   });
 
   test("uses workspace-scoped deterministic ids", () => {

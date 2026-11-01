@@ -261,14 +261,20 @@ describe("fresh installation", () => {
     expect(welcome(sqlite).title).toBe("Welcome to EdgeEver");
   });
 
-  test("keeps the Chinese seed when the client sends no language", async () => {
+  test("defaults to the English seed when the client sends no language", async () => {
     const { sqlite, db } = freshInstallation();
     addUser(sqlite, "usr_owner", "admin");
 
     await ensureUserWorkspace(db, "usr_owner", "admin", undefined);
 
-    expect(notebookNames(sqlite)).toEqual(CHINESE_NOTEBOOKS);
-    expect(welcome(sqlite).title).toBe("欢迎来到 EdgeEver");
+    expect(notebookNames(sqlite)).toEqual({
+      inbox: "Inbox",
+      "work-projects": "Work Projects",
+      "learning-resources": "Learning Resources",
+      "creative-ideas": "Creative Ideas",
+      "personal-life": "Personal Life",
+    });
+    expect(welcome(sqlite).title).toBe("Welcome to EdgeEver");
     expect(pendingWorkspaces(sqlite)).toEqual([]);
   });
 });

@@ -12,7 +12,7 @@ export const localeEnglishNames: Record<SupportedLocale, string> = {
 };
 
 /** Used when there is no locale evidence (legacy callers, missing headers). */
-export const defaultLocale: SupportedLocale = "zh-CN";
+export const defaultLocale: SupportedLocale = "en-US";
 
 /** Used when locale evidence exists but is not a shipped UI language. */
 export const unmatchedLocale: SupportedLocale = "en-US";

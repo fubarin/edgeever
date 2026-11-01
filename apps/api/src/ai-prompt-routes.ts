@@ -17,15 +17,11 @@ import { audit, auditStatement } from "./audit";
 import { createId, isoNow } from "./entity-utils";
 import { forbidden, notFound } from "./http-errors";
 import { getAuditActor, getWorkspaceId, requireUser } from "./request-auth";
+import { getRequestLocale } from "./request-locale";
 
 type AiPromptRouteDependencies = {
   isDemoMode: (environment: Bindings) => boolean;
 };
-
-const getRequestLocale = (context: AppContext) =>
-  context.req.query("locale")?.trim()
-  || context.req.header("Accept-Language")?.split(",")[0]?.trim()
-  || undefined;
 
 const denyMutation = (context: AppContext, dependencies: AiPromptRouteDependencies) => {
   const denied = requireUser(context);

@@ -38,11 +38,11 @@ describe("supported locale matching", () => {
 });
 
 describe("supported locale resolution", () => {
-  test("keeps Chinese as the empty default and English as the unmatched fallback", () => {
-    expect(defaultLocale).toBe("zh-CN");
+  test("keeps English as both the empty default and the unmatched fallback", () => {
+    expect(defaultLocale).toBe("en-US");
     expect(unmatchedLocale).toBe("en-US");
-    expect(resolveSupportedLocale(null)).toBe("zh-CN");
-    expect(resolveSupportedLocale("")).toBe("zh-CN");
+    expect(resolveSupportedLocale(null)).toBe("en-US");
+    expect(resolveSupportedLocale("")).toBe("en-US");
     expect(resolveSupportedLocale("ja-JP")).toBe("ja");
     expect(resolveSupportedLocale("ko")).toBe("en-US");
     expect(resolveSupportedLocale("de-DE")).toBe("en-US");

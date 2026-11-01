@@ -17,6 +17,7 @@ import type { AppEnv, AuditActor } from "./api-context";
 import { createId, parseJsonArray } from "./entity-utils";
 import { notFound } from "./http-errors";
 import { getActorLabel, getAuditActor, getWorkspaceId } from "./request-auth";
+import { getRequestLocale } from "./request-locale";
 import type { DatabaseAdapter } from "./storage-contract";
 
 export type MemoTemplateRow = {
@@ -100,6 +101,7 @@ export const getMemoTemplate = async (
 export const listMemoTemplates = async (
   db: DatabaseAdapter,
   workspaceId: string,
+  locale?: string | null,
 ): Promise<MemoTemplate[]> => {
   const rows = await db.prepare(
     `SELECT id, name, description, title, content_json, content_markdown, tags_json, created_at, updated_at
@@ -107,7 +109,7 @@ export const listMemoTemplates = async (
      WHERE workspace_id = ?
      ORDER BY updated_at DESC, name ASC`,
   ).bind(workspaceId).all<MemoTemplateRow>();
-  return rows.results.map(mapMemoTemplateRow);
+  return rows.results.map((row) => localizeDefaultMemoTemplate(mapMemoTemplateRow(row), locale));
 };
 
 export const registerTemplateRoutes = (
@@ -116,7 +118,9 @@ export const registerTemplateRoutes = (
 ) => {
   const { createMemoRecord, getMemoDetail } = dependencies;
   app.get("/api/v1/templates", async (c) => {
-    return c.json({ templates: await listMemoTemplates(c.env.storage.db, getWorkspaceId(c)) });
+    return c.json({
+      templates: await listMemoTemplates(c.env.storage.db, getWorkspaceId(c), getRequestLocale(c)),
+    });
   });
 
   // Optional templates clients offer next to the workspace's own; reading the

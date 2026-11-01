@@ -40,7 +40,7 @@ describe("memo template gallery", () => {
       tags: ["template", "daily-journal"],
     });
     expect(localizeMemoTemplateGalleryItem(journal, "ko-KR").name).toBe("Daily Journal");
-    expect(localizeMemoTemplateGalleryItem(journal, null).name).toBe("每日日志");
+    expect(localizeMemoTemplateGalleryItem(journal, null).name).toBe("Daily Journal");
   });
 
   test("lists the whole gallery in the requested language", () => {

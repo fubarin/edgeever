@@ -56,7 +56,7 @@ describe("web locale resolution", () => {
     expect(getBrowserLocale()).toBe("en-US");
     setNavigatorLanguages(["ko-KR"]);
     expect(getInitialLocale()).toBe("en-US");
-    expect(defaultLocale).toBe("zh-CN");
+    expect(defaultLocale).toBe("en-US");
   });
 
   test("uses the first supported language in the browser preference list", () => {
