@@ -3,7 +3,8 @@ import type { AuditActor } from "./api-context";
 import { AppError } from "./app-error";
 import { auditStatement } from "./audit";
 import { createId, isoNow, slugify } from "./entity-utils";
-import type { DatabaseAdapter } from "./storage-contract";
+import type { DatabaseAdapter, PreparedStatementAdapter } from "./storage-contract";
+import { deleteMemoSearchDocumentsStatement } from "./memo-search-index";
 import { isInboxNotebook, workspaceInboxId } from "./workspace-provisioning";
 
 export { isInboxNotebook, workspaceInboxId } from "./workspace-provisioning";
@@ -291,15 +292,76 @@ const listActiveNotebookTree = async (db: DatabaseAdapter, workspaceId: string, 
   return rows.results;
 };
 
-const hasActiveMemosInNotebooks = async (db: DatabaseAdapter, workspaceId: string, notebookIds: string[]) => {
+// Active notes anywhere in the subtree. Deleting a parent now trashes them
+// together with the notebooks instead of blocking the whole delete.
+const listActiveMemoIdsInNotebooks = async (db: DatabaseAdapter, workspaceId: string, notebookIds: string[]) => {
+  const memoIds: string[] = [];
   for (const chunk of chunkValues(notebookIds, NOTEBOOK_DELETE_ID_CHUNK)) {
+    if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
-    const row = await db.prepare(
-      `SELECT 1 AS found FROM memos WHERE workspace_id = ? AND is_deleted = 0 AND notebook_id IN (${placeholders}) LIMIT 1`
-    ).bind(workspaceId, ...chunk).first<{ found: number }>();
-    if (row) return true;
+    const rows = await db.prepare(
+      `SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = 0 AND notebook_id IN (${placeholders})`
+    ).bind(workspaceId, ...chunk).all<{ id: string }>();
+    for (const row of rows.results) memoIds.push(row.id);
   }
-  return false;
+  return memoIds;
+};
+
+// Same soft-delete shape as deleting each note by hand: shares are dropped,
+// the note and its attachments go to the trash, and the search index follows.
+// Trashes every note found in the subtree. Called again after the notebooks are
+// gone so a note inserted while the delete was running is never left hidden
+// inside a deleted notebook: it lands in the trash instead.
+const trashSubtreeMemosOnce = async (
+  db: DatabaseAdapter,
+  workspaceId: string,
+  notebookIds: string[],
+  actor: AuditActor,
+) => {
+  const memoIds = await listActiveMemoIdsInNotebooks(db, workspaceId, notebookIds);
+  if (memoIds.length === 0) return [];
+  await db.batch(trashMemosInNotebooksStatements(db, workspaceId, memoIds, actor, isoNow()));
+  return memoIds;
+};
+
+const trashMemosInNotebooksStatements = (
+  db: DatabaseAdapter,
+  workspaceId: string,
+  memoIds: string[],
+  actor: AuditActor,
+  now: string,
+): PreparedStatementAdapter[] => {
+  const statements: PreparedStatementAdapter[] = [];
+  for (const chunk of chunkValues(memoIds, NOTEBOOK_DELETE_ID_CHUNK)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    statements.push(
+      db.prepare(`DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id IN (${placeholders})`).bind(workspaceId, ...chunk),
+      db
+        .prepare(
+          `UPDATE memos
+           SET is_deleted = 1, deleted_at = ?, updated_at = ?
+           WHERE workspace_id = ? AND is_deleted = 0 AND id IN (${placeholders})`
+        )
+        .bind(now, now, workspaceId, ...chunk),
+      db
+        .prepare(
+          `UPDATE resources
+           SET is_deleted = 1, deleted_at = ?, updated_at = ?
+           WHERE is_deleted = 0 AND memo_id IN (${placeholders})`
+        )
+        .bind(now, now, ...chunk),
+      deleteMemoSearchDocumentsStatement(db, chunk)
+    );
+    for (const memoId of chunk) {
+      statements.push(
+        auditStatement(db, actor.actorType, actor.actorId, "memo.delete", "memo", memoId, {
+          cascade: "notebook.delete",
+        })
+      );
+    }
+  }
+  return statements;
 };
 
 export const deleteNotebookTree = async (
@@ -309,8 +371,9 @@ export const deleteNotebookTree = async (
   actor: AuditActor,
   options: { dryRun?: boolean; guardConcurrentChanges?: boolean } = {},
 ) => {
-  const result = (notebookIds: string[]) => ({
+  const result = (notebookIds: string[], memoIds: string[] = []) => ({
     notebookId: id, notebookIds, notebookCount: notebookIds.length,
+    memoIds, memoCount: memoIds.length,
     dryRun: options.dryRun === true, deleted: options.dryRun !== true,
   });
   const current = await db.prepare(
@@ -329,24 +392,21 @@ export const deleteNotebookTree = async (
   }
 
   const notebookIds = tree.map((notebook) => notebook.id);
-  // Empty child notebooks are removed with the parent. Notes anywhere in the
-  // subtree block the whole delete so a parent click cannot orphan them.
-  if (await hasActiveMemosInNotebooks(db, workspaceId, notebookIds)) {
-    throw new AppError(
-      "notebook_not_empty",
-      "Move or delete notes in this notebook and its child notebooks before deleting it.",
-      409
-    );
-  }
+  // Child notebooks are always removed with the parent. Notes anywhere in the
+  // subtree are trashed in the same batch so a parent click can never be
+  // blocked by descendants the user cannot see.
+  const cascadeMemoIds = await listActiveMemoIdsInNotebooks(db, workspaceId, notebookIds);
 
-  if (options.dryRun) return result(notebookIds);
+  if (options.dryRun) return result(notebookIds, cascadeMemoIds);
 
   const now = isoNow();
+  const trashMemos = trashMemosInNotebooksStatements(db, workspaceId, cascadeMemoIds, actor, now);
+  const memoAudit = JSON.stringify({ notebookIds, memoIds: cascadeMemoIds });
   const inboxId = workspaceInboxId(workspaceId);
   if (options.guardConcurrentChanges) {
-    // One guarded UPDATE prevents a note inserted after the emptiness check
-    // from being hidden. Require the same active subtree, including parent
-    // links, so concurrent moves/creates/deletes require a fresh attempt.
+    // One guarded UPDATE keeps the delete atomic against concurrent hierarchy
+    // changes: require the same active subtree, including parent links, so
+    // concurrent moves/creates/deletes require a fresh attempt.
     const serializedSnapshot = JSON.stringify(tree.map(({ id, parent_id }) => ({ id, parent_id })));
     const update = db.prepare(`
       WITH RECURSIVE tree(id) AS (
@@ -368,25 +428,27 @@ export const deleteNotebookTree = async (
           WHERE e.id IS NULL OR n.parent_id IS NOT e.parent_id
         )
         AND NOT EXISTS (SELECT 1 FROM active_tree WHERE slug = 'inbox' OR id = 'nb_inbox' OR id = ?)
-        AND NOT EXISTS (
-          SELECT 1 FROM memos WHERE workspace_id = ? AND is_deleted = 0
-          AND notebook_id IN (SELECT id FROM active_tree)
-        )
     `).bind(workspaceId, id, workspaceId, workspaceId, serializedSnapshot,
-      now, now, workspaceId, notebookIds.length, inboxId, workspaceId);
+      now, now, workspaceId, notebookIds.length, inboxId);
     const auditDelete = db.prepare(`
       INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, metadata_json, created_at)
       SELECT ?, ?, ?, 'notebook.delete', 'notebook', ?, ?, ? WHERE changes() = ?
-    `).bind(createId("audit"), actor.actorType, actor.actorId, id, JSON.stringify({ notebookIds }), now, notebookIds.length);
-    const [, audited] = await db.batch([update, auditDelete]);
+    `).bind(createId("audit"), actor.actorType, actor.actorId, id, memoAudit, now, notebookIds.length);
+    // Notes listed before the snapshot are trashed first so the guarded UPDATE
+    // stays the last write the conditional audit counts.
+    const results = await db.batch([...trashMemos, update, auditDelete]);
+    const audited = results[results.length - 1];
     // Adapter UPDATE metadata may include sync-trigger writes. The conditional
     // audit uses SQLite changes(), which counts only the notebook rows.
     if (!(Number(audited?.meta.changes) > 0)) {
       throw new AppError("notebook_changed", "Notebook contents or hierarchy changed. Preview again before retrying deletion.", 409);
     }
-    return result(notebookIds);
+    await trashSubtreeMemosOnce(db, workspaceId, notebookIds, actor);
+    return result(notebookIds, cascadeMemoIds);
   }
-  const statements = chunkValues(notebookIds, NOTEBOOK_DELETE_ID_CHUNK).map((chunk) => {
+  const statements = [
+    ...trashMemos,
+    ...chunkValues(notebookIds, NOTEBOOK_DELETE_ID_CHUNK).map((chunk) => {
     const placeholders = chunk.map(() => "?").join(", ");
     return db.prepare(
       `UPDATE notebooks
@@ -394,12 +456,15 @@ export const deleteNotebookTree = async (
        WHERE workspace_id = ? AND is_deleted = 0 AND id IN (${placeholders})
          AND (slug IS NULL OR slug <> 'inbox') AND id <> 'nb_inbox' AND id <> ?`
     ).bind(now, now, workspaceId, ...chunk, inboxId);
-  });
+    }),
+  ];
   statements.push(auditStatement(db, actor.actorType, actor.actorId, "notebook.delete", "notebook", id, {
     notebookIds,
+    memoIds: cascadeMemoIds,
   }));
   await db.batch(statements);
-  return result(notebookIds);
+  await trashSubtreeMemosOnce(db, workspaceId, notebookIds, actor);
+  return result(notebookIds, cascadeMemoIds);
 };
 
 // Preserve the existing REST deletion contract and mechanism.

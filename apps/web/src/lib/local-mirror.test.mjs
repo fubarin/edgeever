@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { NotebookNotEmptyError } from "./notebook-delete.ts";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
 
 globalThis.indexedDB = indexedDB;
@@ -377,9 +376,13 @@ describe("local mirror", () => {
     await notebook("blocked", null, "仍有笔记");
     await notebook("blocked-child", "blocked", "子笔记本");
     await createLocalMemo(scope, { notebookId: "blocked-child", title: "还在", tags: [] });
-    await expect(deleteLocalNotebookTree(scope, "blocked")).rejects.toBeInstanceOf(NotebookNotEmptyError);
-    expect(await getLocalNotebook(scope, "blocked")).not.toBeNull();
-    expect(await getLocalNotebook(scope, "blocked-child")).not.toBeNull();
+    const trashedIds = await deleteLocalNotebookTree(scope, "blocked");
+    expect(new Set(trashedIds)).toEqual(new Set(["blocked-child", "blocked"]));
+    expect(await getLocalNotebook(scope, "blocked")).toBeNull();
+    expect(await getLocalNotebook(scope, "blocked-child")).toBeNull();
+    await expect(listLocalMemos(scope, { trash: true, limit: 50 })).resolves.toMatchObject({
+      memos: [expect.objectContaining({ title: "还在" })],
+    });
   });
 
   test("does not restore a notebook that is waiting to be deleted", async () => {

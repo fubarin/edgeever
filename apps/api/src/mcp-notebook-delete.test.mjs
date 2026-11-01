@@ -52,13 +52,17 @@ describe("MCP empty notebook deletion", () => {
     } finally { f.sqlite.close(); }
   });
 
-  test("rejects notes anywhere in the subtree for preview and execution, but preserves trashed notes", async () => {
+  test("trashes notes anywhere in the subtree, and preserves trashed notes", async () => {
     const f = fixture();
     try {
       insertNote(f.sqlite);
-      for (const dryRun of [true, false]) await expect(f.call({ notebookId: "parent", dryRun })).rejects.toMatchObject({ code: "notebook_not_empty" });
+      const preview = await f.call({ notebookId: "parent", dryRun: true });
+      expect(preview).toMatchObject({ dryRun: true, notebookCount: 2, memoCount: 1, memoIds: ["note"] });
       expect(auditCount(f.sqlite)).toBe(0);
-      f.sqlite.exec("UPDATE memos SET is_deleted = 1 WHERE id = 'note'");
+      expect(f.sqlite.query("SELECT is_deleted FROM notebooks WHERE id = 'parent'").get().is_deleted).toBe(0);
+      await f.call({ notebookId: "parent" });
+      expect(f.sqlite.query("SELECT notebook_id, is_deleted FROM memos WHERE id = 'note'").get()).toEqual({ notebook_id: "child", is_deleted: 1 });
+      // A retried delete of an already trashed note is a no-op.
       await f.call({ notebookId: "parent" });
       expect(f.sqlite.query("SELECT notebook_id, is_deleted FROM memos WHERE id = 'note'").get()).toEqual({ notebook_id: "child", is_deleted: 1 });
     } finally { f.sqlite.close(); }
@@ -90,13 +94,24 @@ describe("MCP empty notebook deletion", () => {
   test.each(["note", "child", "move", "delete"])("rejects a concurrent %s change without partial deletion or audit", async change => {
     const f = fixture();
     try {
+      let injected = false;
       f.context.env.storage.db = { prepare: sql => f.db.prepare(sql), batch: async statements => {
+        if (!injected) {
+          injected = true;
         if (change === "note") insertNote(f.sqlite);
         if (change === "child") f.sqlite.exec("INSERT INTO notebooks (id, workspace_id, parent_id, name) VALUES ('new', 'ws_delete', 'child', 'New')");
         if (change === "move") f.sqlite.exec("UPDATE notebooks SET parent_id = NULL WHERE id = 'child'");
         if (change === "delete") f.sqlite.exec("UPDATE notebooks SET is_deleted = 1 WHERE id = 'child'");
+        }
         return f.db.batch(statements);
       } };
+      if (change === "note") {
+        // A note that arrives while the delete runs joins the trash instead of
+        // being left hidden inside a deleted notebook.
+        await f.call({ notebookId: "parent" });
+        expect(f.sqlite.query("SELECT notebook_id, is_deleted FROM memos WHERE id = 'note'").get()).toEqual({ notebook_id: "child", is_deleted: 1 });
+        return;
+      }
       await expect(f.call({ notebookId: "parent" })).rejects.toMatchObject({ code: "notebook_changed" });
       expect(f.sqlite.query("SELECT is_deleted FROM notebooks WHERE id = 'parent'").get().is_deleted).toBe(0);
       expect(auditCount(f.sqlite)).toBe(0);

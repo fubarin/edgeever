@@ -27,7 +27,7 @@ import type { MemoFilterMode, MemoSortMode } from "@/lib/app-helpers";
 import { api, type SyncChangesResponse } from "@/lib/api";
 import { localDb, selectNewestLocalDraft, type LocalDraft, type LocalMemo, type LocalNotebook, type LocalResource, type LocalRevision } from "@/lib/local-db";
 import { cacheLocalResourceBytes, localResourceUrl, removeCachedLocalResourceBytes } from "@/lib/local-resource-cache";
-import { NotebookNotEmptyError, notebooksBlockedByPendingDeletes } from "@/lib/notebook-delete";
+import { notebooksBlockedByPendingDeletes } from "@/lib/notebook-delete";
 import { isBrowserOffline } from "@/lib/network-status";
 import { parseTagsText } from "@/lib/utils";
 import { createClientUuid } from "@/lib/client-id";
@@ -574,17 +574,26 @@ export const deleteLocalNotebook = async (scope: string, notebookId: string) => 
 const isProtectedInboxNotebook = (notebook: Pick<Notebook, "id" | "slug">) =>
   notebook.slug === "inbox" || notebook.id === "nb_inbox" || notebook.id.endsWith("_inbox");
 
-// Removes the notebook and its empty descendants. Ids are leaves-first so a
-// server that still deletes one notebook at a time can apply them in order.
+// Removes the notebook, its descendants and the notes they contain. Ids are
+// leaves-first so a server that still deletes one notebook at a time can apply
+// them in order; notes are soft-deleted locally the same way the API trashes
+// them, so they stay recoverable from the trash.
 export const deleteLocalNotebookTree = async (scope: string, notebookId: string) => {
   const { notebooks } = await listLocalNotebooks(scope);
   const ids = getNotebookDescendantIds(notebooks, notebookId);
   const idSet = new Set(ids);
   const selected = notebooks.filter((notebook) => idSet.has(notebook.id));
   if (selected.length === 0) return [notebookId];
-  if (selected.some((notebook) => notebook.memoCount > 0)) throw new NotebookNotEmptyError();
   if (selected.some((notebook) => isProtectedInboxNotebook(notebook))) throw new Error("inbox_not_deletable");
-  await Promise.all(selected.map((notebook) => localDb.notebooks.delete([scope, notebook.id])));
+  const deletedAt = new Date().toISOString();
+  const memosToTrash = (await localDb.memos.where("scope").equals(scope).toArray())
+    .filter((memo) => !memo.isDeleted && memo.notebookId !== null && idSet.has(memo.notebookId));
+  await localDb.transaction("rw", [localDb.notebooks, localDb.memos], async () => {
+    await Promise.all(selected.map((notebook) => localDb.notebooks.delete([scope, notebook.id])));
+    if (memosToTrash.length > 0) {
+      await localDb.memos.bulkPut(memosToTrash.map((memo) => ({ ...memo, isDeleted: true, deletedAt })));
+    }
+  });
   return [...ids].reverse();
 };
 

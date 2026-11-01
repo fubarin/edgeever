@@ -517,10 +517,15 @@ assert.equal(remainingNotebookIds.has(historyNotebook.id), false, "every empty d
 const blockedNotebook = (await request("notebook.create", { name: "仍有笔记" })).notebook;
 const blockedChild = (await request("notebook.create", { name: "子笔记本", parentId: blockedNotebook.id })).notebook;
 await request("memo.create", { notebookId: blockedChild.id, title: "还在", contentMarkdown: "keep", tags: [] });
-await assert.rejects(request("notebook.delete", { notebookId: blockedNotebook.id }), /notebook_not_empty/);
+const cascadeDelete = await request("notebook.delete", { notebookId: blockedNotebook.id });
+assert.equal(cascadeDelete.memoCount, 1, "the note inside the child notebook is trashed with the parent");
 const blockedNotebookIds = new Set((await request("notebook.list")).notebooks.map((notebook) => notebook.id));
-assert.equal(blockedNotebookIds.has(blockedNotebook.id), true, "a notebook with notes in a child should stay");
-assert.equal(blockedNotebookIds.has(blockedChild.id), true, "a child notebook that still has notes should stay");
+assert.equal(blockedNotebookIds.has(blockedNotebook.id), false, "a notebook with notes in a child should be deleted");
+assert.equal(blockedNotebookIds.has(blockedChild.id), false, "a child notebook should be deleted with its parent");
+const trashedMemos = (await request("memo.list", { trash: true, limit: 50 })).memos;
+assert.equal(trashedMemos.some((memo) => memo.title === "还在"), true, "the trashed note stays recoverable");
+const deletedMemos = (await request("memo.list", { notebookId: blockedChild.id, limit: 50 })).memos;
+assert.equal(deletedMemos.length, 0, "the trashed note leaves the notebook");
 
 // Reproduce the installed client's failed notebook acknowledgement with notes
 // and a child already referring to the placeholder.
@@ -606,4 +611,4 @@ for (const key of Object.keys(appearance)) assert.equal((await readAppearance())
 
 child.stdin.end();
 await new Promise((resolve) => child.once("close", resolve));
-console.log(JSON.stringify({ ok: true, checked: ["notebook.appearance.roundtrip-sync-rollback", "memo.create", "memo.list.search", "memo.list.noteKind", "memo.list.tag", "memo.list.subtree", "memo.update", "memo.update.coalesce", "memo.revisions", "memo.restoreRevision", "memo.revision.cache", "tag.rename", "memo.moveBatch", "memo.pinBatch", "memo.deleteBatch", "memo.restore", "memo.emptyTrash", "memo.merge", "template.cache", "template.create.payload", "template.delete", "storage.backup", "storage.backups", "storage.restore", "sync.apply.merge-page-order", "sync.apply.deleted-notebook", "sync.apply.renamed-inbox", "sync.outbox", "sync.outbox.notebook-remap", "sync.outbox.notebook-remap-rollback", "sync.outbox.retry", "sync.outbox.recoverMemoUpdate", "sync.outbox.discard", "notebook.delete.empty-tree", "notebook.delete.not-empty"] }));
+console.log(JSON.stringify({ ok: true, checked: ["notebook.appearance.roundtrip-sync-rollback", "memo.create", "memo.list.search", "memo.list.noteKind", "memo.list.tag", "memo.list.subtree", "memo.update", "memo.update.coalesce", "memo.revisions", "memo.restoreRevision", "memo.revision.cache", "tag.rename", "memo.moveBatch", "memo.pinBatch", "memo.deleteBatch", "memo.restore", "memo.emptyTrash", "memo.merge", "template.cache", "template.create.payload", "template.delete", "storage.backup", "storage.backups", "storage.restore", "sync.apply.merge-page-order", "sync.apply.deleted-notebook", "sync.apply.renamed-inbox", "sync.outbox", "sync.outbox.notebook-remap", "sync.outbox.notebook-remap-rollback", "sync.outbox.retry", "sync.outbox.recoverMemoUpdate", "sync.outbox.discard", "notebook.delete.empty-tree", "notebook.delete.cascade-trash"] }));

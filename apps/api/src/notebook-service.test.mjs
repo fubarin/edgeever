@@ -18,11 +18,21 @@ const createFixture = () => {
     );
     CREATE TABLE memos (
       id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, notebook_id TEXT NOT NULL, title TEXT,
-      is_deleted INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+      is_deleted INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, deleted_at TEXT
     );
     CREATE TABLE audit_events (
       id TEXT PRIMARY KEY, actor_type TEXT NOT NULL, actor_id TEXT, action TEXT NOT NULL,
       entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE memo_shares (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, memo_id TEXT NOT NULL
+    );
+    CREATE TABLE resources (
+      id TEXT PRIMARY KEY, memo_id TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL, deleted_at TEXT
+    );
+    CREATE TABLE memo_search_documents (
+      memo_id TEXT NOT NULL
     );
     INSERT INTO notebooks (id, workspace_id, name, slug, is_deleted, created_at, updated_at) VALUES
       ('ws_1_inbox', 'ws_1', '等待分类', 'inbox', 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z'),
@@ -259,7 +269,7 @@ describe("notebook identity", () => {
     }
   });
 
-  test("keeps the whole notebook tree when any descendant still has a note", async () => {
+  test("trashes the whole notebook tree together with the notes inside it", async () => {
     const fixture = createFixture();
     try {
       fixture.sqlite.exec(`
@@ -267,15 +277,31 @@ describe("notebook identity", () => {
           ('nb_child', 'ws_1', 'nb_notes', '子笔记本', 'child', 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z');
         INSERT INTO memos (id, workspace_id, notebook_id, title, is_deleted, updated_at)
         VALUES ('memo_keep', 'ws_1', 'nb_child', '还在', 0, '2026-09-10T00:00:00.000Z');
+        INSERT INTO memo_shares (id, workspace_id, memo_id) VALUES ('share_keep', 'ws_1', 'memo_keep');
+        INSERT INTO resources (id, memo_id, is_deleted, updated_at)
+        VALUES ('res_keep', 'memo_keep', 0, '2026-09-10T00:00:00.000Z');
+        INSERT INTO memo_search_documents (memo_id) VALUES ('memo_keep');
       `);
 
-      await expect(deleteNotebookRecord(fixture.db, "ws_1", "nb_notes", actor)).rejects.toMatchObject({
-        code: "notebook_not_empty",
-        status: 409,
-      });
+      await deleteNotebookRecord(fixture.db, "ws_1", "nb_notes", actor);
+
       expect(
-        fixture.sqlite.query("SELECT id FROM notebooks WHERE workspace_id = 'ws_1' AND is_deleted = 1").all(),
-      ).toEqual([]);
+        fixture.sqlite.query("SELECT id FROM notebooks WHERE workspace_id = 'ws_1' AND is_deleted = 0 ORDER BY id").all(),
+      ).toEqual([{ id: "ws_1_inbox" }]);
+      expect(
+        fixture.sqlite.query("SELECT id FROM notebooks WHERE workspace_id = 'ws_1' AND is_deleted = 1 ORDER BY id").all(),
+      ).toEqual([{ id: "nb_child" }, { id: "nb_notes" }]);
+      expect(
+        fixture.sqlite.query("SELECT is_deleted, deleted_at IS NOT NULL AS trashed_at FROM memos WHERE id = 'memo_keep'").get(),
+      ).toEqual({ is_deleted: 1, trashed_at: 1 });
+      expect(
+        fixture.sqlite.query("SELECT action FROM audit_events WHERE entity_type = 'memo' AND entity_id = 'memo_keep'").all(),
+      ).toEqual([{ action: "memo.delete" }]);
+      expect(fixture.sqlite.query("SELECT id FROM memo_shares").all()).toEqual([]);
+      expect(
+        fixture.sqlite.query("SELECT is_deleted FROM resources WHERE id = 'res_keep'").get(),
+      ).toEqual({ is_deleted: 1 });
+      expect(fixture.sqlite.query("SELECT memo_id FROM memo_search_documents").all()).toEqual([]);
     } finally {
       fixture.sqlite.close();
     }

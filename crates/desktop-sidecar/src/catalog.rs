@@ -246,8 +246,10 @@ pub(crate) fn delete_notebook(database: &Connection, params: &Value) -> Result<V
         return Err("inbox_not_deletable".to_owned());
     }
 
-    let memo_count: i64 = database
-        .query_row(
+    // Notes anywhere in the subtree go to the trash together with the
+    // notebooks, so deleting a parent is never blocked by descendants.
+    let trashed_memo_ids: Vec<String> = database
+        .prepare(
             "WITH RECURSIVE tree(id) AS (
                SELECT id FROM notebooks WHERE id = ?1
                UNION ALL
@@ -255,22 +257,39 @@ pub(crate) fn delete_notebook(database: &Connection, params: &Value) -> Result<V
                INNER JOIN tree ON n.parent_id = tree.id
                WHERE n.is_deleted = 0
              )
-             SELECT COUNT(*) FROM memos
-             WHERE is_deleted = 0 AND notebook_id IN (
+             SELECT m.id FROM memos m
+             WHERE m.is_deleted = 0 AND m.notebook_id IN (
                SELECT n.id FROM notebooks n INNER JOIN tree ON tree.id = n.id WHERE n.is_deleted = 0
              )",
-            [&notebook_id],
-            |row| row.get(0),
         )
+        .and_then(|mut statement| {
+            statement
+                .query_map([&notebook_id], |row| row.get(0))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        })
         .map_err(|e| e.to_string())?;
-    if memo_count > 0 {
-        return Err("notebook_not_empty".to_owned());
-    }
 
     let ids: Vec<String> = tree.iter().map(|notebook| notebook.id.clone()).collect();
     let tx = database
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
+    for memo_id in &trashed_memo_ids {
+        tx.execute(
+            "UPDATE memos
+             SET is_deleted = 1,
+                 deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1 AND is_deleted = 0",
+            [memo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        enqueue_change(
+            &tx,
+            "memo.delete",
+            memo_id,
+            &json!({ "memoId": memo_id, "permanent": false }),
+        )?;
+    }
     for id in &ids {
         tx.execute(
             "UPDATE notebooks
@@ -292,7 +311,11 @@ pub(crate) fn delete_notebook(database: &Connection, params: &Value) -> Result<V
         &json!({ "notebookId": notebook_id, "notebookIds": ids }),
     )?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true }))
+    Ok(json!({
+        "ok": true,
+        "memoIds": trashed_memo_ids,
+        "memoCount": trashed_memo_ids.len(),
+    }))
 }
 
 pub(crate) fn restore_notebook(database: &Connection, params: &Value) -> Result<Value, String> {

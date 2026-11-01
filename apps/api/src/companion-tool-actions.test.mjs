@@ -68,19 +68,25 @@ describe("shared companion MCP adapter", () => {
     expect((await getMemoDetail(f.db, scope.workspaceId, f.notes[0].id)).contentMarkdown).toBe("One original content");
   });
 
-  test("companion notebook deletion preserves nonempty subtrees and protects the inbox", async () => {
+  test("companion notebook deletion trashes nonempty subtrees and protects the inbox", async () => {
     const f = await setup();
     f.sqlite.query("UPDATE notebooks SET parent_id = 'target' WHERE id = 'ideas'").run();
     f.sqlite.query("INSERT INTO notebooks(id, workspace_id, name, slug) VALUES (?, ?, 'Inbox', 'inbox')").run(`${scope.workspaceId}_inbox`, scope.workspaceId);
     const tools = createCompanionTools({ ...f, scope, signal: new AbortController().signal, assertActive: async () => {}, sources: [] });
-    for (const dryRun of [true, false]) {
-      await expect(tools.delete_notebook.execute({ notebookId: "target", dryRun })).rejects.toMatchObject({ code: "notebook_not_empty" });
-    }
+    const preview = await tools.delete_notebook.execute({ notebookId: "target", dryRun: true });
+    expect(preview).toMatchObject({ dryRun: true, deleted: false, memoCount: f.notes.length });
+    expect(f.sqlite.query("SELECT COUNT(*) AS n FROM notebooks WHERE is_deleted = 1").get().n).toBe(0);
+    await tools.delete_notebook.execute({ notebookId: "target" });
     const inboxTools = createCompanionTools({ ...f, scope, signal: new AbortController().signal, assertActive: async () => {}, sources: [] });
     await expect(inboxTools.delete_notebook.execute({ notebookId: `${scope.workspaceId}_inbox` })).rejects.toMatchObject({ code: "bad_request" });
-    expect(f.sqlite.query("SELECT COUNT(*) AS n FROM notebooks WHERE is_deleted = 1").get().n).toBe(0);
-    expect(f.sqlite.query("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'notebook.delete'").get().n).toBe(0);
-    expect((await getMemoDetail(f.db, scope.workspaceId, f.notes[0].id)).isDeleted).toBe(false);
+    expect(f.sqlite.query("SELECT COUNT(*) AS n FROM notebooks WHERE is_deleted = 1").get().n).toBeGreaterThan(0);
+    expect(f.sqlite.query("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'notebook.delete'").get().n).toBe(1);
+    for (const note of f.notes) {
+      // Trashed notes are no longer readable as details, exactly like a
+      // note deleted on its own.
+      expect(f.sqlite.query("SELECT is_deleted FROM memos WHERE id = ?").get(note.id).is_deleted).toBe(1);
+      await expect(getMemoDetail(f.db, scope.workspaceId, note.id)).resolves.toBeNull();
+    }
   });
 
   test("poster CRUD reuses scoped queries, guarded edits, recoverable trash and restoration", async () => {
